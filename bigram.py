@@ -1,6 +1,3 @@
-
-# !wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,9 +5,12 @@ import torch.nn.functional as F
 # hyperparameters
 batch_size = 4 # batches of blocks to process in parallel
 block_size = 8 # size of blocks to train on
-max_iters = 10000
-eval_interval = 1000
-eval_iters = 20
+max_iters = 5000
+eval_interval = 500
+eval_iters = 50
+n_embd = 32
+head_size = 16
+learning_rate = 1e-3
 
 with open('input.txt', 'r', encoding='utf-8') as file:
     text = file.read()
@@ -64,13 +64,26 @@ def estimate_loss():
     return out
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.sa_heads = MultiHead(4, n_embd // 4)
+        self.lang_model_head = nn.Linear(n_embd, vocab_size)
     
     def forward(self, index, targets=None):
+        B, T = index.shape
+        
+        # gets embedding from token index
+        token_embd = self.token_embedding_table(index) # (B, T, n_embd)
+        position_embd = self.position_embedding_table(torch.arange(T)) # (T, C)
+        x = token_embd + position_embd
+        
+        # self attention
+        x = self.sa_heads(x)
+        
         # returns (batch, time {which char of the batch}, channel {vocab_size})
-        logits = self.token_embedding_table(index)
+        logits = self.lang_model_head(x)
         
         if targets is None:
             loss = None
@@ -84,14 +97,46 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, index, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, loss = self(index)
+            index_crop = index[:, -block_size:]
+            logits, loss = self(index_crop)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             index_next = torch.multinomial(probs, num_samples=1)
             index = torch.cat((index, index_next), dim=1)
         return index
 
-model = BigramLanguageModel(vocab_size)
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x) # (B, T, head_size)
+        q = self.query(x) # (B, T, head_size)
+        
+        # attention scores
+        # note scaled attention to lower variance and suit softmax
+        weights = q @ k.transpose(-2, -1) * (C**-0.5) # (B, T, head_size) @ (B, head_size, T) ==> (B, T, T)
+        weights = weights.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        weights = F.softmax(weights, dim=-1)
+        
+        v = self.value(x)
+        out = weights @ v
+        return out
+
+class MultiHead(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+    
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+        
+model = BigramLanguageModel()
 
 x, y = get_batch('train')
 logits, loss = model(x, y)
@@ -100,7 +145,7 @@ index = torch.zeros((1, 1), dtype=torch.long)
 print(decode(model.generate(index, max_new_tokens=100)[0].tolist()))
 
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 batch_size = 32
 
