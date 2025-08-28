@@ -11,6 +11,9 @@ eval_iters = 50
 n_embd = 32
 head_size = 16
 learning_rate = 1e-3
+n_block = 3 # numbers of blocks in transformer
+n_head = 4 # number of heads in multihead (good to be a divisor of n_embd)
+dropout = 0.2 # dropout disables some neurons each forward/backward pass to prevent overfitting, 0.2 == 20% of neurons
 
 with open('input.txt', 'r', encoding='utf-8') as file:
     text = file.read()
@@ -68,7 +71,8 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_heads = MultiHead(4, n_embd // 4)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head) for _ in range(n_block)])
+        self.layer_norm_final = nn.LayerNorm(n_embd)
         self.lang_model_head = nn.Linear(n_embd, vocab_size)
     
     def forward(self, index, targets=None):
@@ -79,8 +83,9 @@ class BigramLanguageModel(nn.Module):
         position_embd = self.position_embedding_table(torch.arange(T)) # (T, C)
         x = token_embd + position_embd
         
-        # self attention
-        x = self.sa_heads(x)
+        x = self.blocks(x)
+        
+        x = self.layer_norm_final(x)
         
         # returns (batch, time {which char of the batch}, channel {vocab_size})
         logits = self.lang_model_head(x)
@@ -112,6 +117,7 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
         B, T, C = x.shape
@@ -124,6 +130,8 @@ class Head(nn.Module):
         weights = weights.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         weights = F.softmax(weights, dim=-1)
         
+        weights = self.dropout(weights)
+        
         v = self.value(x)
         out = weights @ v
         return out
@@ -132,10 +140,45 @@ class MultiHead(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
-        
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        out = self.dropout(out)
+        return out
+
+class FeedForward(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.ffwd = nn.Sequential(
+            # layer dim enlarged by 4 as optimization taken from original paper
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
+    
+    def forward(self, x):
+        return self.ffwd(x)
+
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHead(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        # revist layer norm
+        self.layer_norm1 = nn.LayerNorm(n_embd)
+        self.layer_norm2 = nn.LayerNorm(n_embd)
+    
+    def forward(self, x):
+        # break off the main path, perform operation, come back
+        x = x + self.sa(self.layer_norm1(x))
+        x = x + self.ffwd(self.layer_norm2(x))
+        return x
+    
 model = BigramLanguageModel()
 
 x, y = get_batch('train')
@@ -163,4 +206,4 @@ for step in range(max_iters):
     loss.backward()
     optimizer.step()
 
-print(decode(model.generate(index, max_new_tokens=100)[0].tolist()))
+print(decode(model.generate(index, max_new_tokens=1000)[0].tolist()))
