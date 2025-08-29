@@ -185,8 +185,6 @@ x, y = get_batch('train')
 logits, loss = model(x, y)
 
 index = torch.zeros((1, 1), dtype=torch.long)
-print(decode(model.generate(index, max_new_tokens=100)[0].tolist()))
-
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -206,4 +204,9 @@ for step in range(max_iters):
     loss.backward()
     optimizer.step()
 
-print(decode(model.generate(index, max_new_tokens=1000)[0].tolist()))
+generated_text = decode(model.generate(index, max_new_tokens=2000)[0].tolist())
+
+with open('output.txt', 'w', encoding='utf-8') as f:
+    f.write(generated_text)
+
+print(generated_text)
